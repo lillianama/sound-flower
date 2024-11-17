@@ -6,5 +6,8 @@
     ],
     "idf.port": "/dev/cu.usbmodem1101",
     "idf.enableSizeTaskAfterBuildTask": false,
-    "idf.flashType": "DFU"
+    "idf.flashType": "DFU",
+    "files.associations": {
+        "functional": "cpp"
+    }
 }
