@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_adc/adc_continuous.h"
 #include "esp_log.h"
+#include "esp_dsp.h"
 
 // Arduino Nano ESP32 on-board RGB led
 #define RED_PIN 46
@@ -25,8 +26,8 @@ CRGB leds[NUM_LEDS];
 #define ADC_BIT_WIDTH 12
 #define PEAK_HOLD_TIME 500                      // Peak hold time in milliseconds
 #define PEAK_DECAY_SPEED 1                      // Peak decay speed (time between falling in ms)
-#define SAMPLES 256                             // Must be a power of 2 (e.g., 64, 128, 256)
-#define SAMPLING_FREQUENCY 10000                // Sampling frequency in Hz
+#define SAMPLES 256                            // Must be a power of 2 (e.g., 64, 128, 256)
+#define SAMPLING_FREQUENCY 16000                // Sampling frequency in Hz
 #define AREF 3.3                                // Analog reference voltage
 
 // --
@@ -48,6 +49,32 @@ void mapXY() {
 	for (int x = 0; x < LED_MATRIX_WIDTH; x++)
 		for (int y = 0; y < LED_MATRIX_HEIGHT; y++)
 			XY[x][y] = calcXY(x, y);
+}
+
+void updateLedMatrix(float *spectrum) {
+	int binsPerBucket = (SAMPLES / 2 - 2) / LED_MATRIX_WIDTH;// 2
+
+	for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+		float sum = 0;
+
+		// Sum up the values in each bucket, skipping the first two bins
+		for (int i = 0; i < binsPerBucket; i++) {
+			sum += spectrum[(x * binsPerBucket + i) + 2];
+		}
+
+		// Scale the amplitude values (adjust the scaling factor if needed)
+		int amplitude = (int) (sum / binsPerBucket * 4);// Multiply to boost the values
+
+		// Limit the amplitude to the maximum height of the matrix (8 rows)
+		if (amplitude > LED_MATRIX_HEIGHT) amplitude = LED_MATRIX_HEIGHT;
+
+		// Set the matrix column based on the amplitude
+		for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+			leds[XY[x][y]] = (y < amplitude) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
+		}
+	}
+
+	FastLED.show();// Update LED strip
 }
 
 // --
@@ -111,9 +138,9 @@ void refreshMatrix() {
 // Use ESP's Continuous ADC sampling into DMA for efficient high sampling rate
 // Process audio samples into FFT frequency domain data
 // --
-static uint8_t audioBuffer[SAMPLES];
-double vReal[SAMPLES];
-double vImag[SAMPLES];
+__attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
+float vFFT[SAMPLES * 2]; // FFT Vector. x2 because we need space for both real and imaginary parts of the data
+float vReal[SAMPLES]; // Just real parts, post FFT, for visualization
 
 void adc_dma_task(void *arg) {
 	adc_continuous_handle_t adc_handle = (adc_continuous_handle_t) arg;
@@ -186,14 +213,16 @@ extern "C" void app_main(void) {
     lil_init_led();
     mapXY();
 
+	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
+
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
 
 	// ADC configuration
 	adc_continuous_handle_t adc_handle = NULL;
 	adc_continuous_handle_cfg_t adc_config = {
-        .max_store_buf_size = 1024,
-        .conv_frame_size = SAMPLES
-	};
+		.max_store_buf_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES * 4,
+		.conv_frame_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES
+    };
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &adc_handle));
 
 	adc_continuous_config_t dig_cfg = {
@@ -228,29 +257,67 @@ extern "C" void app_main(void) {
 
 	uint32_t read_bytes = 0;
 	esp_err_t ret;
-
-    while (1) {
+    uint16_t sampleIndex = 0;
+	
+	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
 		while (1) {
-			ESP_LOGI("SoundFlowerSampling", "entering main loop");
-			ret = adc_continuous_read(adc_handle, audioBuffer, SAMPLES, &read_bytes, 0);
+			//ESP_LOGI("SoundFlowerSampling", "entering main loop");
+
+			ret = adc_continuous_read(adc_handle, audioBuffer, SAMPLES * SOC_ADC_DIGI_RESULT_BYTES, &read_bytes, 0);
+
 			if (ret == ESP_OK) {
-				ESP_LOGI("SoundFlowerSampling", "ret is %x, ret_num is %" PRIu32 " bytes", ret, read_bytes);
-				printf("Captured sample: ");
-				for (int i = 0; i < SAMPLES; i++) {
-					printf("%i ", audioBuffer[i]);
+				//ESP_LOGI("SoundFlowerSampling", "ret is %x, ret_num is %" PRIu32 " bytes", ret, read_bytes);
+                sampleIndex = 0;
+
+				for (int i = 0; i < read_bytes; i += SOC_ADC_DIGI_RESULT_BYTES) {
+					adc_digi_output_data_t *p = (adc_digi_output_data_t *) &audioBuffer[i];
+					uint32_t data = p->type2.data;
+                    vFFT[sampleIndex * 2] = (float) data / 4096.0 * AREF;   //real part
+					vFFT[sampleIndex * 2 + 1] = 0.0;                        //imaginary part
+					sampleIndex++;
+                    //ESP_LOGI("SoundFlowerSampling", "Sampled Value: %" PRIu32, data);
 				}
-				printf("\n");
+
+                // Perform FFT
+				dsps_fft2r_fc32(vFFT, SAMPLES);
+
+				// Perform bit reversal
+				dsps_bit_rev_fc32(vFFT, SAMPLES);
+
+				// Convert complex values to magnitudes
+				dsps_cplx2reC_fc32(vFFT, SAMPLES);
+
+                //Split out the real parts to do visualizations
+                for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
+
+                // Perform visualizations
+                updateLedMatrix(vReal);
+
+				// Calculate magnitudes manually
+				// float magnitudes[SAMPLES / 2];
+				// for (int i = 0; i < SAMPLES / 2; i++) {
+				// 	float real = vFFT[2 * i];       // Real part
+				// 	float imag = vFFT[2 * i + 1];   // Imaginary part
+				// 	magnitudes[i] = sqrtf(real * real + imag * imag);
+				// }
+
+				// float binWidth = SAMPLING_FREQUENCY / SAMPLES;      // Hz per bin
+				// for (int i = 0; i < SAMPLES / 2; i++) {
+				// 	float frequency = i * binWidth;
+				// 	printf("Bin %d: Frequency %.2f Hz, Magnitude %.2f\n", i, frequency, magnitudes[i]);
+				// }
+
 				/**
                  * Because printing is slow, so every time you call `ulTaskNotifyTake`, it will immediately return.
                  * To avoid a task watchdog timeout, add a delay here. When you replace the way you process the data,
                  * usually you don't need this delay (as this task will block for a while).
                  */
-				vTaskDelay(1);
+				//vTaskDelay(1);
 			} else if (ret == ESP_ERR_TIMEOUT) {
 				//We try to read `EXAMPLE_READ_LEN` until API returns timeout, which means there's no available data
-				ESP_LOGE("SoundFlowerSampling", "Got error timeout");
+				//ESP_LOGE("SoundFlowerSampling", "Got error timeout");
 				break;
 			}
 		}

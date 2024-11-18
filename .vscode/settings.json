@@ -8,6 +8,8 @@
     "idf.enableSizeTaskAfterBuildTask": false,
     "idf.flashType": "DFU",
     "files.associations": {
-        "functional": "cpp"
+        "functional": "cpp",
+        "*.tcc": "cpp",
+        "complex": "cpp"
     }
 }
