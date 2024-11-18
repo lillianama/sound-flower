@@ -1,6 +1,6 @@
 dependencies:
-  espressif/esp-dsp: "*"
+  espressif/esp-dsp: "^1.4.12"
   espressif/arduino-esp32: "^3.0.4"
   idf:
-    version: '>=4.1.0'
+    version: '>=5.1.4'
 

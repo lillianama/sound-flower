@@ -6,6 +6,7 @@
 #include "esp_adc/adc_continuous.h"
 #include "esp_log.h"
 #include "esp_dsp.h"
+#include <esp_timer.h>
 
 // Arduino Nano ESP32 on-board RGB led
 #define RED_PIN 46
@@ -13,25 +14,28 @@
 #define BLUE_PIN 45
 
 // Pin Configuration
-#define LED_DATA_PIN 18                         // Pin connected to the LED strip
-#define SR_DATA_PIN 5                           // DS (Data input)
-#define SR_CLOCK_PIN 6                          // SH_CP (Clock)
-#define SR_LATCH_PIN 7                          // ST_CP (Latch)
+#define LED_DATA_PIN 18// Pin connected to the LED strip
+#define SR_DATA_PIN 5  // DS (Data input)
+#define SR_CLOCK_PIN 6 // SH_CP (Clock)
+#define SR_LATCH_PIN 7 // ST_CP (Latch)
 
-#define NUM_LEDS 256                            // Adjust this to match the number of LEDs on your strip
-
+// LED Display Configuration
+#define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
+#define LED_NUM_BANDS 8
+#define LED_BAND_HOLD_TIME 50
+#define LED_PEAK_HOLD_TIME 180// Peak hold time in milliseconds
+#define LED_PEAK_DECAY_SPEED 1// Peak decay speed (time between falling in ms)
 CRGB leds[NUM_LEDS];
 
-#define MIC_PIN ADC1_CHANNEL_0                  // ADC Channel to use
+// Audio Capture Configuration
+#define MIC_PIN ADC1_CHANNEL_0// ADC Channel to use
 #define ADC_BIT_WIDTH 12
-#define PEAK_HOLD_TIME 500                      // Peak hold time in milliseconds
-#define PEAK_DECAY_SPEED 1                      // Peak decay speed (time between falling in ms)
-#define SAMPLES 256                            // Must be a power of 2 (e.g., 64, 128, 256)
-#define SAMPLING_FREQUENCY 16000                // Sampling frequency in Hz
-#define AREF 3.3                                // Analog reference voltage
+#define SAMPLES 1024            // Must be a power of 2 (e.g., 64, 128, 256)
+#define SAMPLING_FREQUENCY 48000// Sampling frequency in Hz
+#define AREF 3.3                // Analog reference voltage
 
 // --
-// WS2812 16x16 LED Matrix Config
+// WS2812 16x16 Serpentine LED Matrix Config
 // --
 #define LED_MATRIX_WIDTH 16
 #define LED_MATRIX_HEIGHT 16
@@ -49,6 +53,89 @@ void mapXY() {
 	for (int x = 0; x < LED_MATRIX_WIDTH; x++)
 		for (int y = 0; y < LED_MATRIX_HEIGHT; y++)
 			XY[x][y] = calcXY(x, y);
+}
+
+void updateLedMatrixGrouped8(float *vReal) {
+	static bool initializing = true;
+
+	// static int64_t timer = esp_timer_get_time();
+	// if ((esp_timer_get_time() - timer) / 1000 < LED_PEAK_HOLD_TIME) return;
+	// timer = esp_timer_get_time();
+	// ESP_LOGI("updateLedMatrixGrouped8", "tick");
+
+	struct lil_vu_band {
+		int min;//minimum
+		int max;
+		int64_t hold_timer;//microseconds since last reset
+		int value;
+		int peak;
+		int64_t peak_hold_timer;//microseconds since last reset
+	};
+	static struct lil_vu_band lilVUBands[8];
+
+	if (initializing) {
+		const int64_t init_time = esp_timer_get_time();
+		//8 bands, 12kHz top band
+		//derived from https://github.com/s-marley/ESP32_FFT_VU/blob/master/FFT.xlsx
+		//TODO: write this in code and not an excel?
+		lilVUBands[0] = {.min = 0, .max = 3, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[1] = {.min = 4, .max = 5, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[2] = {.min = 6, .max = 11, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[3] = {.min = 12, .max = 22, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[4] = {.min = 23, .max = 46, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[5] = {.min = 47, .max = 93, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[6] = {.min = 94, .max = 191, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[7] = {.min = 192, .max = 511, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+
+		initializing = false;
+	}
+
+	bool timerExpired;
+	bool largerVal;
+
+	for (int i = 1; i < SAMPLES / 2; i++) {
+		for (int bnd_i = 0; bnd_i < LED_NUM_BANDS; bnd_i++) {
+			if (i >= lilVUBands[bnd_i].min && i <= lilVUBands[bnd_i].max) {
+				int64_t elapsed_time_ms = (esp_timer_get_time() - lilVUBands[bnd_i].hold_timer) / 1000;
+				int new_val = (int) vReal[i] * 0.20;
+				timerExpired = (elapsed_time_ms > LED_BAND_HOLD_TIME);
+				largerVal = (new_val > (int) lilVUBands[bnd_i].value);
+
+				if (timerExpired || largerVal) {
+					// if (timerExpired) ESP_LOGI("updateLedMatrixGrouped8", "expired %d elapsed %" PRId64, timerExpired, elapsed_time_ms);
+					// if (largerVal) ESP_LOGI("updateLedMatrixGrouped8", "this %d larger than %d", (int) vReal[i], lilVUBands[bnd_i].value);
+					lilVUBands[bnd_i].value = new_val;
+					lilVUBands[bnd_i].hold_timer = esp_timer_get_time();
+				}
+			}
+		}
+	}
+
+	for (int x = 0; x < LED_NUM_BANDS; x++) {
+		if (lilVUBands[x].value > LED_MATRIX_HEIGHT) lilVUBands[x].value = LED_MATRIX_HEIGHT;
+		if (lilVUBands[x].value < 0) lilVUBands[x].value = 0;
+
+		if (lilVUBands[x].value > lilVUBands[x].peak) {
+			lilVUBands[x].peak = lilVUBands[x].value;
+			lilVUBands[x].peak_hold_timer = esp_timer_get_time();
+		} else if ((esp_timer_get_time() - lilVUBands[x].peak_hold_timer) / 1000 > LED_PEAK_HOLD_TIME) {
+			//decay peak
+			if (lilVUBands[x].peak >= 1) lilVUBands[x].peak--;
+		}
+
+		// Set the matrix column based on the amplitude
+		for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+			leds[XY[x * 2][y]] = (y < lilVUBands[x].value) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
+			leds[XY[x * 2 + 1][y]] = (y < lilVUBands[x].value) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
+		}
+
+		if (lilVUBands[x].peak > 1) {
+			leds[XY[x * 2][lilVUBands[x].peak - 1]] = CRGB::White;
+			leds[XY[x * 2 + 1][lilVUBands[x].peak - 1]] = CRGB::White;
+		}
+	}
+
+	FastLED.show();// Update LED strip
 }
 
 void updateLedMatrix(float *spectrum) {
@@ -107,7 +194,7 @@ void lil_shift_register_test() {
 	digitalWrite(SR_LATCH_PIN, HIGH);// Latch the data to output
 	vTaskDelay(500 / portTICK_PERIOD_MS);
 
-	// Step through every led one by one
+	// Step through every LED one-by-one
 	for (int row = 1; row <= 8; row++) {
 		for (int col = 1; col <= 8; col++) {
 			digitalWrite(SR_LATCH_PIN, LOW);// Prepare to send data
@@ -139,30 +226,15 @@ void refreshMatrix() {
 // Process audio samples into FFT frequency domain data
 // --
 __attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
-float vFFT[SAMPLES * 2]; // FFT Vector. x2 because we need space for both real and imaginary parts of the data
-float vReal[SAMPLES]; // Just real parts, post FFT, for visualization
-
-void adc_dma_task(void *arg) {
-	adc_continuous_handle_t adc_handle = (adc_continuous_handle_t) arg;
-	uint32_t read_bytes = 0;
-
-	while (1) {
-		esp_err_t ret = adc_continuous_read(adc_handle, audioBuffer, SAMPLES, &read_bytes, portMAX_DELAY);
-		if (ret == ESP_OK) {
-			ESP_LOGI("ADC_TASK", "Read %lu bytes", (unsigned long) read_bytes);
-			// Process buffer here (e.g., convert to voltage, perform FFT, etc.)
-		} else {
-			ESP_LOGE("ADC_TASK", "ADC read failed");
-		}
-	}
-}
+float vFFT[SAMPLES * 2];// FFT Vector. x2 because we need space for both real and imaginary parts of the data
+float vReal[SAMPLES];   // Just real parts isolated for visualization
 
 // --
 // Initialize
 // --
 
 void lil_init_led() {
-    // Initialize onboard LED
+	// Initialize onboard LED
 	pinMode(RED_PIN, OUTPUT);
 	pinMode(GREEN_PIN, OUTPUT);
 	pinMode(BLUE_PIN, OUTPUT);
@@ -173,22 +245,22 @@ void lil_init_led() {
 	// Initialize FastLED and set brightness
 	FastLED.addLeds<WS2812, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
 	FastLED.setBrightness(10);// Adjust as necessary
-	FastLED.setTemperature(Candle);
+	//FastLED.setTemperature(Candle);
 
-    // Test LED Matrix with rainbow
-	for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
-	FastLED.show();
-	vTaskDelay(1000 / portTICK_PERIOD_MS);
-	FastLED.clear();
-	FastLED.show();
+	// Test LED Matrix with rainbow
+	// for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
+	// FastLED.show();
+	// vTaskDelay(1000 / portTICK_PERIOD_MS);
+	// FastLED.clear();
+	// FastLED.show();
 
 	// Initialize 8x8 and test all lights
 	pinMode(SR_DATA_PIN, OUTPUT);
 	pinMode(SR_CLOCK_PIN, OUTPUT);
 	pinMode(SR_LATCH_PIN, OUTPUT);
-    lil_shift_register_test();
+	//lil_shift_register_test();
 
-    // Turn onboard LED off
+	// Turn onboard LED off
 	analogWrite(RED_PIN, 255);
 	analogWrite(GREEN_PIN, 255);
 	analogWrite(BLUE_PIN, 255);
@@ -203,62 +275,57 @@ static bool IRAM_ATTR adc_conv_done_cb(adc_continuous_handle_t handle, const adc
 }
 
 extern "C" void app_main(void) {
-    initArduino();
+	initArduino();
 
-    printf("Internal Total heap %d, internal Free Heap %d\n", (int)ESP.getHeapSize(), (int)ESP.getFreeHeap());
-    printf("SPIRam Total heap %d, SPIRam Free Heap %d\n", (int)ESP.getPsramSize(), (int)ESP.getFreePsram());
-    printf("ChipRevision %d, Cpu Freq %d, SDK Version %s\n", (int)ESP.getChipRevision(), (int)ESP.getCpuFreqMHz(), ESP.getSdkVersion());
-    printf("Flash Size %d, Flash Speed %d\n", (int)ESP.getFlashChipSize(), (int)ESP.getFlashChipSpeed());
+	printf("Internal Total heap %d, internal Free Heap %d\n", (int) ESP.getHeapSize(), (int) ESP.getFreeHeap());
+	printf("SPIRam Total heap %d, SPIRam Free Heap %d\n", (int) ESP.getPsramSize(), (int) ESP.getFreePsram());
+	printf("ChipRevision %d, Cpu Freq %d, SDK Version %s\n", (int) ESP.getChipRevision(), (int) ESP.getCpuFreqMHz(), ESP.getSdkVersion());
+	printf("Flash Size %d, Flash Speed %d\n", (int) ESP.getFlashChipSize(), (int) ESP.getFlashChipSpeed());
 
-    lil_init_led();
-    mapXY();
+	lil_init_led();
+	mapXY();
 
 	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
 
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
 
-	// ADC configuration
+	// --
+	// Set up ADC Continous Sampling w/ DMA Buffer for fast audio sampling
+	// --
 	adc_continuous_handle_t adc_handle = NULL;
 	adc_continuous_handle_cfg_t adc_config = {
-		.max_store_buf_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES * 4,
-		.conv_frame_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES
-    };
+			.max_store_buf_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES * 4,
+			.conv_frame_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES};
 	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &adc_handle));
 
 	adc_continuous_config_t dig_cfg = {
-        .pattern_num = 1,
-        .adc_pattern = NULL,
-        .sample_freq_hz = SAMPLING_FREQUENCY,
-        .conv_mode = ADC_CONV_SINGLE_UNIT_1,
-        .format = ADC_DIGI_OUTPUT_FORMAT_TYPE2
-	};
+			.pattern_num = 1,
+			.adc_pattern = NULL,
+			.sample_freq_hz = SAMPLING_FREQUENCY,
+			.conv_mode = ADC_CONV_SINGLE_UNIT_1,
+			.format = ADC_DIGI_OUTPUT_FORMAT_TYPE2};
 	adc_digi_pattern_config_t adc_pattern[SOC_ADC_PATT_LEN_MAX] = {
 			{
-                .atten = ADC_ATTEN_DB_12,
-                .channel = ADC_CHANNEL_0,
-                .unit = ADC_UNIT_1,
-                .bit_width = ADC_BIT_WIDTH,
-			}
-	};
+					.atten = ADC_ATTEN_DB_12,
+					.channel = ADC_CHANNEL_0,
+					.unit = ADC_UNIT_1,
+					.bit_width = ADC_BIT_WIDTH,
+			}};
 	dig_cfg.pattern_num = 1;
 	dig_cfg.adc_pattern = adc_pattern;
 	ESP_ERROR_CHECK(adc_continuous_config(adc_handle, &dig_cfg));
 
 	adc_continuous_evt_cbs_t cbs = {
-        .on_conv_done = adc_conv_done_cb,
-        .on_pool_ovf = NULL
-	};
+			.on_conv_done = adc_conv_done_cb,
+			.on_pool_ovf = NULL};
 	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(adc_handle, &cbs, NULL));
 
 	ESP_ERROR_CHECK(adc_continuous_start(adc_handle));
 
-	// Create the task to process ADC data
-	//xTaskCreate(adc_dma_task, "adc_dma_task", 4096, adc_handle, 5, NULL);
-
 	uint32_t read_bytes = 0;
 	esp_err_t ret;
-    uint16_t sampleIndex = 0;
-	
+	uint16_t sampleIndex = 0;
+
 	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -269,18 +336,18 @@ extern "C" void app_main(void) {
 
 			if (ret == ESP_OK) {
 				//ESP_LOGI("SoundFlowerSampling", "ret is %x, ret_num is %" PRIu32 " bytes", ret, read_bytes);
-                sampleIndex = 0;
+				sampleIndex = 0;
 
 				for (int i = 0; i < read_bytes; i += SOC_ADC_DIGI_RESULT_BYTES) {
 					adc_digi_output_data_t *p = (adc_digi_output_data_t *) &audioBuffer[i];
 					uint32_t data = p->type2.data;
-                    vFFT[sampleIndex * 2] = (float) data / 4096.0 * AREF;   //real part
-					vFFT[sampleIndex * 2 + 1] = 0.0;                        //imaginary part
+					vFFT[sampleIndex * 2] = (float) data / 4096.0 * AREF;//real part
+					vFFT[sampleIndex * 2 + 1] = 0.0;                     //imaginary part
 					sampleIndex++;
-                    //ESP_LOGI("SoundFlowerSampling", "Sampled Value: %" PRIu32, data);
+					//ESP_LOGI("SoundFlowerSampling", "Sampled Value: %" PRIu32, data);
 				}
 
-                // Perform FFT
+				// Perform FFT
 				dsps_fft2r_fc32(vFFT, SAMPLES);
 
 				// Perform bit reversal
@@ -289,11 +356,12 @@ extern "C" void app_main(void) {
 				// Convert complex values to magnitudes
 				dsps_cplx2reC_fc32(vFFT, SAMPLES);
 
-                //Split out the real parts to do visualizations
-                for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
+				//Split out the real parts to do visualizations
+				for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
 
-                // Perform visualizations
-                updateLedMatrix(vReal);
+				// Perform visualizations
+				updateLedMatrixGrouped8(vReal);
+				//updateLedMatrix(vReal);
 
 				// Calculate magnitudes manually
 				// float magnitudes[SAMPLES / 2];

@@ -10,6 +10,13 @@
     "files.associations": {
         "functional": "cpp",
         "*.tcc": "cpp",
-        "complex": "cpp"
+        "complex": "cpp",
+        "optional": "cpp",
+        "ratio": "cpp",
+        "system_error": "cpp",
+        "array": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp"
     }
 }
