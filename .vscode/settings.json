@@ -17,6 +17,8 @@
         "array": "cpp",
         "tuple": "cpp",
         "type_traits": "cpp",
-        "utility": "cpp"
+        "utility": "cpp",
+        "esp_memory_utils.h": "c",
+        "dma_types.h": "c"
     }
 }

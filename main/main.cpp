@@ -4,7 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_adc/adc_continuous.h"
-#include "esp_log.h"
+#include "esp_log.h" 
 #include "esp_dsp.h"
 #include <esp_timer.h>
 
@@ -22,8 +22,8 @@
 // LED Display Configuration
 #define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
 #define LED_NUM_BANDS 8
-#define LED_BAND_HOLD_TIME 50
-#define LED_PEAK_HOLD_TIME 180// Peak hold time in milliseconds
+#define LED_BAND_HOLD_TIME 75
+#define LED_PEAK_HOLD_TIME 200// Peak hold time in milliseconds
 #define LED_PEAK_DECAY_SPEED 1// Peak decay speed (time between falling in ms)
 CRGB leds[NUM_LEDS];
 
@@ -55,7 +55,7 @@ void mapXY() {
 			XY[x][y] = calcXY(x, y);
 }
 
-void updateLedMatrixGrouped8(float *vReal) {
+void updateLedMatrixGrouped8(float *fft) {
 	static bool initializing = true;
 
 	// static int64_t timer = esp_timer_get_time();
@@ -66,6 +66,7 @@ void updateLedMatrixGrouped8(float *vReal) {
 	struct lil_vu_band {
 		int min;//minimum
 		int max;
+		float_t scaling_coeff;
 		int64_t hold_timer;//microseconds since last reset
 		int value;
 		int peak;
@@ -74,18 +75,17 @@ void updateLedMatrixGrouped8(float *vReal) {
 	static struct lil_vu_band lilVUBands[8];
 
 	if (initializing) {
-		const int64_t init_time = esp_timer_get_time();
 		//8 bands, 12kHz top band
 		//derived from https://github.com/s-marley/ESP32_FFT_VU/blob/master/FFT.xlsx
 		//TODO: write this in code and not an excel?
-		lilVUBands[0] = {.min = 0, .max = 3, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[1] = {.min = 4, .max = 5, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[2] = {.min = 6, .max = 11, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[3] = {.min = 12, .max = 22, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[4] = {.min = 23, .max = 46, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[5] = {.min = 47, .max = 93, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[6] = {.min = 94, .max = 191, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[7] = {.min = 192, .max = 511, .hold_timer = init_time, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[0] = {.min = 0, .max = 3, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[1] = {.min = 4, .max = 5, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[2] = {.min = 6, .max = 11, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[3] = {.min = 12, .max = 22, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[4] = {.min = 23, .max = 46, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[5] = {.min = 47, .max = 93, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[6] = {.min = 94, .max = 191, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[7] = {.min = 192, .max = 511, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
 
 		initializing = false;
 	}
@@ -96,8 +96,13 @@ void updateLedMatrixGrouped8(float *vReal) {
 	for (int i = 1; i < SAMPLES / 2; i++) {
 		for (int bnd_i = 0; bnd_i < LED_NUM_BANDS; bnd_i++) {
 			if (i >= lilVUBands[bnd_i].min && i <= lilVUBands[bnd_i].max) {
+				//elasped time since band update
 				int64_t elapsed_time_ms = (esp_timer_get_time() - lilVUBands[bnd_i].hold_timer) / 1000;
-				int new_val = (int) vReal[i] * 0.20;
+
+				//scale the real part of fft by the band's scaling coeff
+				int new_val = (int) fft[i * 2] * lilVUBands[bnd_i].scaling_coeff;
+
+				//conditions to update band
 				timerExpired = (elapsed_time_ms > LED_BAND_HOLD_TIME);
 				largerVal = (new_val > (int) lilVUBands[bnd_i].value);
 
@@ -112,6 +117,7 @@ void updateLedMatrixGrouped8(float *vReal) {
 	}
 
 	for (int x = 0; x < LED_NUM_BANDS; x++) {
+		//enforce the bounds
 		if (lilVUBands[x].value > LED_MATRIX_HEIGHT) lilVUBands[x].value = LED_MATRIX_HEIGHT;
 		if (lilVUBands[x].value < 0) lilVUBands[x].value = 0;
 
@@ -119,7 +125,7 @@ void updateLedMatrixGrouped8(float *vReal) {
 			lilVUBands[x].peak = lilVUBands[x].value;
 			lilVUBands[x].peak_hold_timer = esp_timer_get_time();
 		} else if ((esp_timer_get_time() - lilVUBands[x].peak_hold_timer) / 1000 > LED_PEAK_HOLD_TIME) {
-			//decay peak
+			//decay the peak
 			if (lilVUBands[x].peak >= 1) lilVUBands[x].peak--;
 		}
 
@@ -129,6 +135,7 @@ void updateLedMatrixGrouped8(float *vReal) {
 			leds[XY[x * 2 + 1][y]] = (y < lilVUBands[x].value) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
 		}
 
+		// Set the peak pixel(s)
 		if (lilVUBands[x].peak > 1) {
 			leds[XY[x * 2][lilVUBands[x].peak - 1]] = CRGB::White;
 			leds[XY[x * 2 + 1][lilVUBands[x].peak - 1]] = CRGB::White;
@@ -173,9 +180,7 @@ void updateLedMatrix(float *spectrum) {
 byte matrixBuffer[8] = {0};
 
 void lil_shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val) {
-	uint8_t i;
-
-	for (i = 0; i < 8; i++) {
+	for (uint8_t i = 0; i < 8; i++) {
 		if (bitOrder == LSBFIRST)
 			digitalWrite(dataPin, !!(val & (1 << i)));
 		else
@@ -226,8 +231,8 @@ void refreshMatrix() {
 // Process audio samples into FFT frequency domain data
 // --
 __attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
-float vFFT[SAMPLES * 2];// FFT Vector. x2 because we need space for both real and imaginary parts of the data
-float vReal[SAMPLES];   // Just real parts isolated for visualization
+float vFFT[SAMPLES * 2];// FFT Vector. SAMPLES * 2 because we need space for both real and imaginary parts of each sample
+//float vReal[SAMPLES];   // Just real parts isolated for visualization
 
 // --
 // Initialize
@@ -269,7 +274,6 @@ void lil_init_led() {
 static TaskHandle_t app_main_task_handle;
 static bool IRAM_ATTR adc_conv_done_cb(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data) {
 	BaseType_t mustYield = pdFALSE;
-	//Notify that ADC continuous driver has done enough number of conversions
 	vTaskNotifyGiveFromISR(app_main_task_handle, &mustYield);
 	return (mustYield == pdTRUE);
 }
@@ -357,32 +361,12 @@ extern "C" void app_main(void) {
 				dsps_cplx2reC_fc32(vFFT, SAMPLES);
 
 				//Split out the real parts to do visualizations
-				for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
+				//for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
 
 				// Perform visualizations
-				updateLedMatrixGrouped8(vReal);
+				updateLedMatrixGrouped8(vFFT);
 				//updateLedMatrix(vReal);
 
-				// Calculate magnitudes manually
-				// float magnitudes[SAMPLES / 2];
-				// for (int i = 0; i < SAMPLES / 2; i++) {
-				// 	float real = vFFT[2 * i];       // Real part
-				// 	float imag = vFFT[2 * i + 1];   // Imaginary part
-				// 	magnitudes[i] = sqrtf(real * real + imag * imag);
-				// }
-
-				// float binWidth = SAMPLING_FREQUENCY / SAMPLES;      // Hz per bin
-				// for (int i = 0; i < SAMPLES / 2; i++) {
-				// 	float frequency = i * binWidth;
-				// 	printf("Bin %d: Frequency %.2f Hz, Magnitude %.2f\n", i, frequency, magnitudes[i]);
-				// }
-
-				/**
-                 * Because printing is slow, so every time you call `ulTaskNotifyTake`, it will immediately return.
-                 * To avoid a task watchdog timeout, add a delay here. When you replace the way you process the data,
-                 * usually you don't need this delay (as this task will block for a while).
-                 */
-				//vTaskDelay(1);
 			} else if (ret == ESP_ERR_TIMEOUT) {
 				//We try to read `EXAMPLE_READ_LEN` until API returns timeout, which means there's no available data
 				//ESP_LOGE("SoundFlowerSampling", "Got error timeout");
