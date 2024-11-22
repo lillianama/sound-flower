@@ -2,45 +2,6 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build, Flash - Build, flash",
-      "type": "shell",
-      "command": "${config:idf.pythonBinPath} ${config:idf.espIdfPath}/tools/idf.py build flash size",
-      "windows": {
-        "command": "${config:idf.pythonBinPathWin} ${config:idf.espIdfPathWin}\\tools\\idf.py build flash",
-        "options": {
-          "env": {
-            "PATH": "${env:PATH};${config:idf.customExtraPaths}"
-          }
-        }
-      },
-      "options": {
-        "env": {
-          "PATH": "${env:PATH}:${config:idf.customExtraPaths}"
-        }
-      },
-      "problemMatcher": [
-        {
-          "owner": "cpp",
-          "fileLocation": [
-            "autoDetect",
-            "${workspaceFolder}"
-          ],
-          "pattern": {
-            "regexp": "^(.*?):(\\d+):(\\d*):?\\s+(?:fatal\\s+)?(warning|error):\\s+(.*)$",
-            "file": 1,
-            "line": 2,
-            "column": 3,
-            "severity": 4,
-            "message": 5
-          }
-        }
-      ],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
-    },
-    {
       "label": "Build - Build project",
       "type": "shell",
       "command": "${config:idf.pythonBinPath} ${config:idf.espIdfPath}/tools/idf.py build",
@@ -76,6 +37,7 @@
       ],
       "group": {
         "kind": "build",
+        "isDefault": true
       }
     },
     {
@@ -274,13 +236,14 @@
         "-e",
         "${workspaceFolder}/build/${command:espIdf.getProjectName}.elf",
         "-s",
-        "${command:espIdf.getOpenOcdScriptValue}",
-        "-ip",
-        "localhost",
+        "$OPENOCD_SCRIPTS",
         "-dn",
-        "${config:idf.adapterTargetName}",
+        "esp32",
         "-om",
-        "connect_to_instance"
+        "connect_to_instance",
+        "-t",
+        "xtensa-esp32-elf-"
+
       ],
       "windows": {
         "command": "${config:idf.pythonBinPathWin}",

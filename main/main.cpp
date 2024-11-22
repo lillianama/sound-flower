@@ -6,7 +6,7 @@
 #include "esp_adc/adc_continuous.h"
 #include "esp_log.h" 
 #include "esp_dsp.h"
-#include <esp_timer.h>
+#include "esp_timer.h"
 
 // Arduino Nano ESP32 on-board RGB led
 #define RED_PIN 46
@@ -19,13 +19,16 @@
 #define SR_CLOCK_PIN 6 // SH_CP (Clock)
 #define SR_LATCH_PIN 7 // ST_CP (Latch)
 
-// LED Display Configuration
+// WS2812 16x16 LED Matrix Display Configuration
 #define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
 #define LED_NUM_BANDS 8
 #define LED_BAND_HOLD_TIME 75
 #define LED_PEAK_HOLD_TIME 200// Peak hold time in milliseconds
 #define LED_PEAK_DECAY_SPEED 1// Peak decay speed (time between falling in ms)
 CRGB leds[NUM_LEDS];
+
+// Shift Register 8x8 LED Matrix Configuration
+#define SR_LED_MATRIX_REFRESH_RATE 50		//in microseconds
 
 // Audio Capture Configuration
 #define MIC_PIN ADC1_CHANNEL_0// ADC Channel to use
@@ -145,31 +148,31 @@ void updateLedMatrixGrouped8(float *fft) {
 	FastLED.show();// Update LED strip
 }
 
-void updateLedMatrix(float *spectrum) {
-	int binsPerBucket = (SAMPLES / 2 - 2) / LED_MATRIX_WIDTH;// 2
+// void updateLedMatrix(float *spectrum) {
+// 	int binsPerBucket = (SAMPLES / 2 - 2) / LED_MATRIX_WIDTH;// 2
 
-	for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
-		float sum = 0;
+// 	for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+// 		float sum = 0;
 
-		// Sum up the values in each bucket, skipping the first two bins
-		for (int i = 0; i < binsPerBucket; i++) {
-			sum += spectrum[(x * binsPerBucket + i) + 2];
-		}
+// 		// Sum up the values in each bucket, skipping the first two bins
+// 		for (int i = 0; i < binsPerBucket; i++) {
+// 			sum += spectrum[(x * binsPerBucket + i) + 2];
+// 		}
 
-		// Scale the amplitude values (adjust the scaling factor if needed)
-		int amplitude = (int) (sum / binsPerBucket * 4);// Multiply to boost the values
+// 		// Scale the amplitude values (adjust the scaling factor if needed)
+// 		int amplitude = (int) (sum / binsPerBucket * 4);// Multiply to boost the values
 
-		// Limit the amplitude to the maximum height of the matrix (8 rows)
-		if (amplitude > LED_MATRIX_HEIGHT) amplitude = LED_MATRIX_HEIGHT;
+// 		// Limit the amplitude to the maximum height of the matrix (8 rows)
+// 		if (amplitude > LED_MATRIX_HEIGHT) amplitude = LED_MATRIX_HEIGHT;
 
-		// Set the matrix column based on the amplitude
-		for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
-			leds[XY[x][y]] = (y < amplitude) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
-		}
-	}
+// 		// Set the matrix column based on the amplitude
+// 		for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+// 			leds[XY[x][y]] = (y < amplitude) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
+// 		}
+// 	}
 
-	FastLED.show();// Update LED strip
-}
+// 	FastLED.show();// Update LED strip
+// }
 
 // --
 // Simple 8x8 LED Matrix Config
@@ -177,7 +180,8 @@ void updateLedMatrix(float *spectrum) {
 #define LSBFIRST 0
 #define MSBFIRST 1
 
-byte matrixBuffer[8] = {0};
+volatile byte matrixBuffer[8] = {0};
+esp_timer_handle_t refreshMatrixTimerHandle;
 
 void lil_shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val) {
 	for (uint8_t i = 0; i < 8; i++) {
@@ -188,6 +192,41 @@ void lil_shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t v
 
 		digitalWrite(clockPin, HIGH);
 		digitalWrite(clockPin, LOW);
+	}
+}
+
+void refreshMatrix() {
+	for (int row = 0; row < 8; row++) {
+		digitalWrite(SR_LATCH_PIN, LOW);
+		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~matrixBuffer[row]);// Columns
+		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << row));        // Row
+		digitalWrite(SR_LATCH_PIN, HIGH);
+	}
+}
+
+void refreshMatrixTimer(void *param) {
+	refreshMatrix();
+}
+
+void updateMatrixBuffer(float *fft) {
+	int binsPerBucket = (SAMPLES / 2 - 2) / 8;
+
+	for (int col = 0; col < 8; col++) {
+		float sum = 0;
+
+		// Sum up the values in each bucket, skipping the first two bins
+		for (int i = 0; i < binsPerBucket; i++) {
+			sum += fft[(col * binsPerBucket) + (i * 2) + 2];
+		}
+
+		// Scale the amplitude values (adjust the scaling factor if needed)
+		int amplitude = (int) ((sum / binsPerBucket) * 4);// Multiply to boost the values
+
+		// Limit the amplitude to the maximum height of the matrix (8 rows)
+		if (amplitude > 8) amplitude = 8;
+
+		// Set the matrix column based on the amplitude
+		matrixBuffer[col] = (1 << amplitude) - 1;
 	}
 }
 
@@ -217,14 +256,7 @@ void lil_shift_register_test() {
 	digitalWrite(SR_LATCH_PIN, HIGH);// Latch the data to output
 }
 
-void refreshMatrix() {
-	for (int row = 0; row < 8; row++) {
-		digitalWrite(SR_LATCH_PIN, LOW);
-		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~matrixBuffer[row]);// Columns
-		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << row));        // Row
-		digitalWrite(SR_LATCH_PIN, HIGH);
-	}
-}
+
 
 // --
 // Use ESP's Continuous ADC sampling into DMA for efficient high sampling rate
@@ -263,7 +295,18 @@ void lil_init_led() {
 	pinMode(SR_DATA_PIN, OUTPUT);
 	pinMode(SR_CLOCK_PIN, OUTPUT);
 	pinMode(SR_LATCH_PIN, OUTPUT);
-	//lil_shift_register_test();
+	lil_shift_register_test();
+
+	// Set up refresh task for multiplexing
+	const esp_timer_create_args_t timer_args = {
+			.callback = &refreshMatrixTimer,// Function to call
+			.arg = NULL,                       // Arguments to pass (optional)
+			.dispatch_method = ESP_TIMER_TASK, // Runs callback in a dedicated task
+			.name = "refreshMatrixTimer",     // Timer name
+			.skip_unhandled_events = true
+	};
+	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &refreshMatrixTimerHandle));
+	//ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
 
 	// Turn onboard LED off
 	analogWrite(RED_PIN, 255);
@@ -365,7 +408,7 @@ extern "C" void app_main(void) {
 
 				// Perform visualizations
 				updateLedMatrixGrouped8(vFFT);
-				//updateLedMatrix(vReal);
+				updateMatrixBuffer(vFFT);
 
 			} else if (ret == ESP_ERR_TIMEOUT) {
 				//We try to read `EXAMPLE_READ_LEN` until API returns timeout, which means there's no available data
