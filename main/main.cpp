@@ -148,7 +148,7 @@ void updateLedMatrixGrouped8(float *fft) {
 #define LSBFIRST 0
 #define MSBFIRST 1
 
-volatile bool matrixUpdateReady = false;
+volatile bool matrixBufferReady = false;
 static byte matrixBuffer[8] = {0};
 static esp_timer_handle_t refreshMatrixTimerHandle = NULL;
 static TaskHandle_t refreshMatrixTaskHandle = NULL;
@@ -166,9 +166,9 @@ void lil_shiftOut(gpio_num_t dataPin, gpio_num_t clockPin, uint8_t bitOrder, uin
 
 void refreshMatrix() {
 	static byte local_matrixBuffer[8] = {0};
-	if (matrixUpdateReady) {
+	if (matrixBufferReady) {
 		memcpy8(local_matrixBuffer, matrixBuffer, 8);
-		matrixUpdateReady = false;
+		matrixBufferReady = false;
 	}
 	for (int row = 7; row >= 0; row--) {
 		gpio_set_level(SR_LATCH_PIN, 0);
@@ -229,6 +229,8 @@ void refreshMatrixTask(void *param) {
 // }
 
 void updateMatrixBuffer2(float *fft) {
+	static bool initializing = true;
+
 	struct lil_vu_band {
 		int min;
 		int max;
@@ -239,16 +241,20 @@ void updateMatrixBuffer2(float *fft) {
 		int64_t peak_hold_timer;// Microseconds since last peak reset
 		int64_t peak_decay_timer;
 	};
+	static lil_vu_band lilVUBands[8];
 
-	static lil_vu_band lilVUBands[8] = {
-			{.min = 1, .max = 3, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 4, .max = 5, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 6, .max = 11, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 12, .max = 22, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 23, .max = 46, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 47, .max = 93, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 94, .max = 191, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
-			{.min = 192, .max = 511, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0}};
+	if (initializing) {
+		lilVUBands[0] = {.min = 1, .max = 3, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[1] = {.min = 4, .max = 5, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[2] = {.min = 6, .max = 11, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[3] = {.min = 12, .max = 22, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[4] = {.min = 23, .max = 46, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[5] = {.min = 47, .max = 93, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[6] = {.min = 94, .max = 191, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+		lilVUBands[7] = {.min = 192, .max = 511, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0};
+
+		initializing = false;
+	}
 
 	for (int row = 0; row < 8; row++) {
 		float sum = 0;
@@ -293,12 +299,12 @@ void updateMatrixBuffer2(float *fft) {
 		matrixBuffer[row] = (1 << lilVUBands[row].value) - 1;
 
 		// Optionally add the peak indicator
-		if (lilVUBands[row].peak > 0) {
+		if (lilVUBands[row].peak > 1) {
 			matrixBuffer[row] |= (1 << (lilVUBands[row].peak - 1));
 		}
 	}
 
-	matrixUpdateReady = true;
+	matrixBufferReady = true;
 }
 
 void lil_shift_register_test() {
@@ -379,6 +385,9 @@ void lil_init_led() {
 			.skip_unhandled_events = false};
 	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &refreshMatrixTimerHandle));
 	ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
+	//testMatrixBuffer();
+	// Create the matrix refresh task pinned to Cpu core 1
+	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
 
 	// Turn onboard LED off (We're done)
 	analogWrite(RED_PIN, 255);
@@ -408,10 +417,6 @@ extern "C" void app_main(void) {
 	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
 
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
-
-	//testMatrixBuffer();
-	// Create the matrix refresh task pinned to core 1
-	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
 
 	// --
 	// Set up ADC Continous Sampling w/ DMA Buffer for fast audio sampling
