@@ -1,12 +1,12 @@
 #include <Arduino.h>
 #include <FastLED.h>
-#include "sdkconfig.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_adc/adc_continuous.h"
-#include "esp_log.h" 
-#include "esp_dsp.h"
-#include "esp_timer.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <esp_adc/adc_continuous.h>
+#include <esp_log.h>
+#include <esp_dsp.h>
+#include <esp_timer.h>
+#include <esp_task_wdt.h>
 
 // Arduino Nano ESP32 on-board RGB led
 #define RED_PIN 46
@@ -14,10 +14,10 @@
 #define BLUE_PIN 45
 
 // Pin Configuration
-#define LED_DATA_PIN 18// Pin connected to the LED strip
-#define SR_DATA_PIN 5  // DS (Data input)
-#define SR_CLOCK_PIN 6 // SH_CP (Clock)
-#define SR_LATCH_PIN 7 // ST_CP (Latch)
+#define LED_DATA_PIN 18        // Pin connected to the LED strip
+#define SR_DATA_PIN GPIO_NUM_5 // DS (Data input)
+#define SR_CLOCK_PIN GPIO_NUM_6// SH_CP (Clock)
+#define SR_LATCH_PIN GPIO_NUM_7// ST_CP (Latch)
 
 // WS2812 16x16 LED Matrix Display Configuration
 #define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
@@ -28,7 +28,7 @@
 CRGB leds[NUM_LEDS];
 
 // Shift Register 8x8 LED Matrix Configuration
-#define SR_LED_MATRIX_REFRESH_RATE 50		//in microseconds
+#define SR_LED_MATRIX_REFRESH_RATE 50//in microseconds
 
 // Audio Capture Configuration
 #define MIC_PIN ADC1_CHANNEL_0// ADC Channel to use
@@ -61,11 +61,6 @@ void mapXY() {
 void updateLedMatrixGrouped8(float *fft) {
 	static bool initializing = true;
 
-	// static int64_t timer = esp_timer_get_time();
-	// if ((esp_timer_get_time() - timer) / 1000 < LED_PEAK_HOLD_TIME) return;
-	// timer = esp_timer_get_time();
-	// ESP_LOGI("updateLedMatrixGrouped8", "tick");
-
 	struct lil_vu_band {
 		int min;//minimum
 		int max;
@@ -87,7 +82,7 @@ void updateLedMatrixGrouped8(float *fft) {
 		lilVUBands[3] = {.min = 12, .max = 22, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
 		lilVUBands[4] = {.min = 23, .max = 46, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
 		lilVUBands[5] = {.min = 47, .max = 93, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
-		lilVUBands[6] = {.min = 94, .max = 191, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
+		lilVUBands[6] = {.min = 94, .max = 191, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0}; 
 		lilVUBands[7] = {.min = 192, .max = 511, .scaling_coeff = 0.20, .hold_timer = 0, .value = 0, .peak = 0, .peak_hold_timer = 0};
 
 		initializing = false;
@@ -148,114 +143,117 @@ void updateLedMatrixGrouped8(float *fft) {
 	FastLED.show();// Update LED strip
 }
 
-// void updateLedMatrix(float *spectrum) {
-// 	int binsPerBucket = (SAMPLES / 2 - 2) / LED_MATRIX_WIDTH;// 2
-
-// 	for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
-// 		float sum = 0;
-
-// 		// Sum up the values in each bucket, skipping the first two bins
-// 		for (int i = 0; i < binsPerBucket; i++) {
-// 			sum += spectrum[(x * binsPerBucket + i) + 2];
-// 		}
-
-// 		// Scale the amplitude values (adjust the scaling factor if needed)
-// 		int amplitude = (int) (sum / binsPerBucket * 4);// Multiply to boost the values
-
-// 		// Limit the amplitude to the maximum height of the matrix (8 rows)
-// 		if (amplitude > LED_MATRIX_HEIGHT) amplitude = LED_MATRIX_HEIGHT;
-
-// 		// Set the matrix column based on the amplitude
-// 		for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
-// 			leds[XY[x][y]] = (y < amplitude) ? CHSV(map(y, 0, LED_MATRIX_HEIGHT - 1, 0, 255), 255, 255) : CHSV(0, 0, 0);
-// 		}
-// 	}
-
-// 	FastLED.show();// Update LED strip
-// }
-
 // --
 // Simple 8x8 LED Matrix Config
 // --
 #define LSBFIRST 0
 #define MSBFIRST 1
 
-volatile byte matrixBuffer[8] = {0};
-esp_timer_handle_t refreshMatrixTimerHandle;
+volatile bool matrixUpdateReady = false;
+static byte matrixBuffer[8] = {0};
+static esp_timer_handle_t refreshMatrixTimerHandle = NULL;
+static TaskHandle_t refreshMatrixTaskHandle = NULL;
 
-void lil_shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val) {
+void lil_shiftOut(gpio_num_t dataPin, gpio_num_t clockPin, uint8_t bitOrder, uint8_t val) {
 	for (uint8_t i = 0; i < 8; i++) {
-		if (bitOrder == LSBFIRST)
-			digitalWrite(dataPin, !!(val & (1 << i)));
-		else
-			digitalWrite(dataPin, !!(val & (1 << (7 - i))));
-
-		digitalWrite(clockPin, HIGH);
-		digitalWrite(clockPin, LOW);
+		int bit = (bitOrder == LSBFIRST) ? !!(val & (1 << i)) : !!(val & (1 << (7 - i)));
+		// Set data pin
+		gpio_set_level(dataPin, bit);
+		// Pulse clock pin
+		gpio_set_level(clockPin, 1);
+		gpio_set_level(clockPin, 0);
 	}
 }
 
 void refreshMatrix() {
+	static byte local_matrixBuffer[8] = {0};
+	if (matrixUpdateReady) {
+		memcpy8(local_matrixBuffer, matrixBuffer, 8);
+		matrixUpdateReady = false;
+	}
 	for (int row = 0; row < 8; row++) {
-		digitalWrite(SR_LATCH_PIN, LOW);
-		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~matrixBuffer[row]);// Columns
+		gpio_set_level(SR_LATCH_PIN, 0);
+		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~local_matrixBuffer[row]);// Columns
 		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << row));        // Row
-		digitalWrite(SR_LATCH_PIN, HIGH);
+		gpio_set_level(SR_LATCH_PIN, 1);
 	}
 }
 
 void refreshMatrixTimer(void *param) {
-	refreshMatrix();
+	if (refreshMatrixTaskHandle != NULL) {
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		vTaskNotifyGiveFromISR(refreshMatrixTaskHandle, &xHigherPriorityTaskWoken);
+		// Yield if necessary
+		if (xHigherPriorityTaskWoken == pdTRUE) {
+			portYIELD_FROM_ISR();
+		}
+	}
+}
+
+void refreshMatrixTask(void *param) {
+	while (1) {
+		// Wait for the notification from the timer
+		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		// Call refreshMatrix
+		refreshMatrix();
+	}
+}
+
+void testMatrixBuffer() {
+	for (int row = 0; row < 8; row++) {
+		matrixBuffer[row] = (1 << (row));
+	}
+	matrixUpdateReady = true;
 }
 
 void updateMatrixBuffer(float *fft) {
 	int binsPerBucket = (SAMPLES / 2 - 2) / 8;
 
-	for (int col = 0; col < 8; col++) {
+	for (int row = 0; row < 8; row++) {
 		float sum = 0;
 
 		// Sum up the values in each bucket, skipping the first two bins
 		for (int i = 0; i < binsPerBucket; i++) {
-			sum += fft[(col * binsPerBucket) + (i * 2) + 2];
+			sum += fft[(row * binsPerBucket) + (i * 2) + 2];
 		}
 
 		// Scale the amplitude values (adjust the scaling factor if needed)
-		int amplitude = (int) ((sum / binsPerBucket) * 4);// Multiply to boost the values
+		int amplitude = (int) ((sum / binsPerBucket));// Multiply to boost the values
 
 		// Limit the amplitude to the maximum height of the matrix (8 rows)
 		if (amplitude > 8) amplitude = 8;
 
 		// Set the matrix column based on the amplitude
-		matrixBuffer[col] = (1 << amplitude) - 1;
+		matrixBuffer[row] = (1 << amplitude) - 1;
 	}
+	matrixUpdateReady = true;
 }
 
 void lil_shift_register_test() {
 	// Set ALL LEDs On
-	digitalWrite(SR_LATCH_PIN, LOW);// Prepare to send data
+	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
 	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
 	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
-	digitalWrite(SR_LATCH_PIN, HIGH);// Latch the data to output
+	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
 	vTaskDelay(500 / portTICK_PERIOD_MS);
 
 	// Step through every LED one-by-one
 	for (int row = 1; row <= 8; row++) {
 		for (int col = 1; col <= 8; col++) {
-			digitalWrite(SR_LATCH_PIN, LOW);// Prepare to send data
+			gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
 			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, ~(1 << (col - 1)));
 			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << (row - 1)));
-			digitalWrite(SR_LATCH_PIN, HIGH);// Latch the data to output
+			gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
 			vTaskDelay(50 / portTICK_PERIOD_MS);
 		}
 	}
 
 	// Set ALL LEDs Off
-	digitalWrite(SR_LATCH_PIN, LOW);// Prepare to send data
+	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
 	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
 	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
-	digitalWrite(SR_LATCH_PIN, HIGH);// Latch the data to output
+	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
 }
-
 
 
 // --
@@ -264,7 +262,6 @@ void lil_shift_register_test() {
 // --
 __attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
 float vFFT[SAMPLES * 2];// FFT Vector. SAMPLES * 2 because we need space for both real and imaginary parts of each sample
-//float vReal[SAMPLES];   // Just real parts isolated for visualization
 
 // --
 // Initialize
@@ -292,23 +289,26 @@ void lil_init_led() {
 	// FastLED.show();
 
 	// Initialize 8x8 and test all lights
-	pinMode(SR_DATA_PIN, OUTPUT);
-	pinMode(SR_CLOCK_PIN, OUTPUT);
-	pinMode(SR_LATCH_PIN, OUTPUT);
+	gpio_config_t io_conf = {};
+	io_conf.intr_type = GPIO_INTR_DISABLE;// No interrupts
+	io_conf.mode = GPIO_MODE_OUTPUT;      // Set as output
+	io_conf.pin_bit_mask = (1ULL << SR_LATCH_PIN) | (1ULL << SR_DATA_PIN) | (1ULL << SR_CLOCK_PIN);
+	io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+	io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+	gpio_config(&io_conf);
 	lil_shift_register_test();
 
 	// Set up refresh task for multiplexing
 	const esp_timer_create_args_t timer_args = {
-			.callback = &refreshMatrixTimer,// Function to call
-			.arg = NULL,                       // Arguments to pass (optional)
-			.dispatch_method = ESP_TIMER_TASK, // Runs callback in a dedicated task
+			.callback = &refreshMatrixTimer,  // Function to call
+			.arg = NULL,                      // Arguments to pass (optional)
+			.dispatch_method = ESP_TIMER_TASK,// Runs callback in a dedicated task
 			.name = "refreshMatrixTimer",     // Timer name
-			.skip_unhandled_events = true
-	};
+			.skip_unhandled_events = false};
 	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &refreshMatrixTimerHandle));
-	//ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
+	ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
 
-	// Turn onboard LED off
+	// Turn onboard LED off (We're done)
 	analogWrite(RED_PIN, 255);
 	analogWrite(GREEN_PIN, 255);
 	analogWrite(BLUE_PIN, 255);
@@ -322,6 +322,7 @@ static bool IRAM_ATTR adc_conv_done_cb(adc_continuous_handle_t handle, const adc
 }
 
 extern "C" void app_main(void) {
+	ESP_LOGI("app_main", "Started. Running on core: %d", xPortGetCoreID());
 	initArduino();
 
 	printf("Internal Total heap %d, internal Free Heap %d\n", (int) ESP.getHeapSize(), (int) ESP.getFreeHeap());
@@ -335,6 +336,13 @@ extern "C" void app_main(void) {
 	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
 
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
+
+	testMatrixBuffer();
+	// Create the matrix refresh task pinned to core 1
+	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
+
+	// while (1) { vTaskDelay(500 / portTICK_PERIOD_MS);  }
+	// return;
 
 	// --
 	// Set up ADC Continous Sampling w/ DMA Buffer for fast audio sampling
@@ -391,7 +399,6 @@ extern "C" void app_main(void) {
 					vFFT[sampleIndex * 2] = (float) data / 4096.0 * AREF;//real part
 					vFFT[sampleIndex * 2 + 1] = 0.0;                     //imaginary part
 					sampleIndex++;
-					//ESP_LOGI("SoundFlowerSampling", "Sampled Value: %" PRIu32, data);
 				}
 
 				// Perform FFT
@@ -403,16 +410,14 @@ extern "C" void app_main(void) {
 				// Convert complex values to magnitudes
 				dsps_cplx2reC_fc32(vFFT, SAMPLES);
 
-				//Split out the real parts to do visualizations
-				//for (int i = 0; i < SAMPLES; i++) vReal[i] = vFFT[i * 2];
-
 				// Perform visualizations
 				updateLedMatrixGrouped8(vFFT);
-				updateMatrixBuffer(vFFT);
+				//updateMatrixBuffer(vFFT);
+
+				//vTaskDelay(50 / portTICK_PERIOD_MS);
 
 			} else if (ret == ESP_ERR_TIMEOUT) {
-				//We try to read `EXAMPLE_READ_LEN` until API returns timeout, which means there's no available data
-				//ESP_LOGE("SoundFlowerSampling", "Got error timeout");
+				//No available data
 				break;
 			}
 		}
