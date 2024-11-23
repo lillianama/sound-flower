@@ -6,7 +6,6 @@
 #include <esp_log.h>
 #include <esp_dsp.h>
 #include <esp_timer.h>
-#include <esp_task_wdt.h>
 
 // Arduino Nano ESP32 on-board RGB led
 #define RED_PIN 46
@@ -23,8 +22,8 @@
 #define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
 #define LED_NUM_BANDS 8
 #define LED_BAND_HOLD_TIME 75
-#define LED_PEAK_HOLD_TIME 200// Peak hold time in milliseconds
-#define LED_PEAK_DECAY_SPEED 1// Peak decay speed (time between falling in ms)
+#define LED_PEAK_HOLD_TIME 1000// Peak hold time in milliseconds
+#define LED_PEAK_DECAY_SPEED 100// Peak decay speed (time between falling in ms)
 CRGB leds[NUM_LEDS];
 
 // Shift Register 8x8 LED Matrix Configuration
@@ -171,7 +170,7 @@ void refreshMatrix() {
 		memcpy8(local_matrixBuffer, matrixBuffer, 8);
 		matrixUpdateReady = false;
 	}
-	for (int row = 0; row < 8; row++) {
+	for (int row = 7; row >= 0; row--) {
 		gpio_set_level(SR_LATCH_PIN, 0);
 		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~local_matrixBuffer[row]);// Columns
 		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << row));        // Row
@@ -199,33 +198,106 @@ void refreshMatrixTask(void *param) {
 	}
 }
 
-void testMatrixBuffer() {
-	for (int row = 0; row < 8; row++) {
-		matrixBuffer[row] = (1 << (row));
-	}
-	matrixUpdateReady = true;
-}
+// void testMatrixBuffer() {
+// 	for (int row = 0; row < 8; row++) {
+// 		matrixBuffer[row] = (1 << (row));
+// 	}
+// 	matrixUpdateReady = true;
+// }
 
-void updateMatrixBuffer(float *fft) {
-	int binsPerBucket = (SAMPLES / 2 - 2) / 8;
+// void updateMatrixBuffer(float *fft) {
+// 	int binsPerBucket = (SAMPLES / 2 - 2) / 8;
+
+// 	for (int row = 0; row < 8; row++) {
+// 		float sum = 0;
+
+// 		// Sum up the values in each bucket, skipping the first two bins
+// 		for (int i = 0; i < binsPerBucket; i++) {
+// 			sum += fft[(row * binsPerBucket) + (i * 2) + 2];
+// 		}
+
+// 		// Scale the amplitude values (adjust the scaling factor if needed)
+// 		int amplitude = (int) ((sum / binsPerBucket));// Multiply to boost the values
+
+// 		// Limit the amplitude to the maximum height of the matrix (8 rows)
+// 		if (amplitude > 8) amplitude = 8;
+
+// 		// Set the matrix column based on the amplitude
+// 		matrixBuffer[row] = (1 << amplitude) - 1;
+// 	}
+// 	matrixUpdateReady = true;
+// }
+
+void updateMatrixBuffer2(float *fft) {
+	struct lil_vu_band {
+		int min;
+		int max;
+		float scaling_coeff;
+		int value;
+		int peak;
+		int64_t band_hold_timer;// Microseconds since last reset
+		int64_t peak_hold_timer;// Microseconds since last peak reset
+		int64_t peak_decay_timer;
+	};
+
+	static lil_vu_band lilVUBands[8] = {
+			{.min = 1, .max = 3, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 4, .max = 5, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 6, .max = 11, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 12, .max = 22, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 23, .max = 46, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 47, .max = 93, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 94, .max = 191, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0},
+			{.min = 192, .max = 511, .scaling_coeff = 0.10, .value = 0, .peak = 0, .band_hold_timer = 0, .peak_hold_timer = 0, .peak_decay_timer = 0}};
 
 	for (int row = 0; row < 8; row++) {
 		float sum = 0;
 
-		// Sum up the values in each bucket, skipping the first two bins
-		for (int i = 0; i < binsPerBucket; i++) {
-			sum += fft[(row * binsPerBucket) + (i * 2) + 2];
+		// Sum FFT values for the band's frequency range
+		for (int i = lilVUBands[row].min; i <= lilVUBands[row].max; i++) {
+			sum += fft[i * 2] * lilVUBands[row].scaling_coeff;
 		}
 
-		// Scale the amplitude values (adjust the scaling factor if needed)
-		int amplitude = (int) ((sum / binsPerBucket));// Multiply to boost the values
+		// Calculate the new amplitude
+		int new_value = (int) sum;
+		if (new_value > 8) new_value = 8;
+		if (new_value < 0) new_value = 0;
 
-		// Limit the amplitude to the maximum height of the matrix (8 rows)
-		if (amplitude > 8) amplitude = 8;
+		// Check if the band hold timer has expired
+		int64_t elapsed_band_time_ms = (esp_timer_get_time() - lilVUBands[row].band_hold_timer) / 1000;
+		bool timer_expired = (elapsed_band_time_ms > LED_BAND_HOLD_TIME);
+		bool larger_value = (new_value > lilVUBands[row].value);
 
-		// Set the matrix column based on the amplitude
-		matrixBuffer[row] = (1 << amplitude) - 1;
+		// Update the band's value if the timer expired or the new value is larger
+		if (timer_expired || larger_value) {
+			lilVUBands[row].value = new_value;
+			lilVUBands[row].band_hold_timer = esp_timer_get_time();// Reset the band hold timer
+		}
+
+		// Update the peak
+		if (lilVUBands[row].value > lilVUBands[row].peak) {
+			lilVUBands[row].peak = lilVUBands[row].value;
+			lilVUBands[row].peak_hold_timer = esp_timer_get_time();// Reset the peak hold timer
+		} else {
+			// Decay the peak based on a timer
+			int64_t elapsed_peak_time_ms = (esp_timer_get_time() - lilVUBands[row].peak_decay_timer) / 1000;
+			if (elapsed_peak_time_ms > LED_PEAK_DECAY_SPEED) {
+				if (lilVUBands[row].peak > 0) {
+					lilVUBands[row].peak--;
+					lilVUBands[row].peak_decay_timer = esp_timer_get_time();// Reset the peak hold timer
+				}
+			}
+		}
+
+		// Update the matrix buffer based on the band's value
+		matrixBuffer[row] = (1 << lilVUBands[row].value) - 1;
+
+		// Optionally add the peak indicator
+		if (lilVUBands[row].peak > 0) {
+			matrixBuffer[row] |= (1 << (lilVUBands[row].peak - 1));
+		}
 	}
+
 	matrixUpdateReady = true;
 }
 
@@ -337,12 +409,9 @@ extern "C" void app_main(void) {
 
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
 
-	testMatrixBuffer();
+	//testMatrixBuffer();
 	// Create the matrix refresh task pinned to core 1
 	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
-
-	// while (1) { vTaskDelay(500 / portTICK_PERIOD_MS);  }
-	// return;
 
 	// --
 	// Set up ADC Continous Sampling w/ DMA Buffer for fast audio sampling
@@ -412,7 +481,7 @@ extern "C" void app_main(void) {
 
 				// Perform visualizations
 				updateLedMatrixGrouped8(vFFT);
-				//updateMatrixBuffer(vFFT);
+				updateMatrixBuffer2(vFFT);
 
 				//vTaskDelay(50 / portTICK_PERIOD_MS);
 
