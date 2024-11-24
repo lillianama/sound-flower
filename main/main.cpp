@@ -22,8 +22,8 @@
 #define NUM_LEDS 256// Adjust this to match the number of LEDs on your strip
 #define LED_NUM_BANDS 8
 #define LED_BAND_HOLD_TIME 75
-#define LED_PEAK_HOLD_TIME 1000// Peak hold time in milliseconds
-#define LED_PEAK_DECAY_SPEED 100// Peak decay speed (time between falling in ms)
+#define LED_PEAK_HOLD_TIME 500// Peak hold time in milliseconds
+#define LED_PEAK_DECAY_SPEED 50// Peak decay speed (time between falling in ms)
 CRGB leds[NUM_LEDS];
 
 // Shift Register 8x8 LED Matrix Configuration
@@ -205,29 +205,6 @@ void refreshMatrixTask(void *param) {
 // 	matrixUpdateReady = true;
 // }
 
-// void updateMatrixBuffer(float *fft) {
-// 	int binsPerBucket = (SAMPLES / 2 - 2) / 8;
-
-// 	for (int row = 0; row < 8; row++) {
-// 		float sum = 0;
-
-// 		// Sum up the values in each bucket, skipping the first two bins
-// 		for (int i = 0; i < binsPerBucket; i++) {
-// 			sum += fft[(row * binsPerBucket) + (i * 2) + 2];
-// 		}
-
-// 		// Scale the amplitude values (adjust the scaling factor if needed)
-// 		int amplitude = (int) ((sum / binsPerBucket));// Multiply to boost the values
-
-// 		// Limit the amplitude to the maximum height of the matrix (8 rows)
-// 		if (amplitude > 8) amplitude = 8;
-
-// 		// Set the matrix column based on the amplitude
-// 		matrixBuffer[row] = (1 << amplitude) - 1;
-// 	}
-// 	matrixUpdateReady = true;
-// }
-
 void updateMatrixBuffer2(float *fft) {
 	static bool initializing = true;
 
@@ -284,10 +261,9 @@ void updateMatrixBuffer2(float *fft) {
 		if (lilVUBands[row].value > lilVUBands[row].peak) {
 			lilVUBands[row].peak = lilVUBands[row].value;
 			lilVUBands[row].peak_hold_timer = esp_timer_get_time();// Reset the peak hold timer
-		} else {
+		} else if (((esp_timer_get_time() - lilVUBands[row].peak_hold_timer) / 1000) > LED_PEAK_HOLD_TIME) {
 			// Decay the peak based on a timer
-			int64_t elapsed_peak_time_ms = (esp_timer_get_time() - lilVUBands[row].peak_decay_timer) / 1000;
-			if (elapsed_peak_time_ms > LED_PEAK_DECAY_SPEED) {
+			if (((esp_timer_get_time() - lilVUBands[row].peak_decay_timer) / 1000) > LED_PEAK_DECAY_SPEED) {
 				if (lilVUBands[row].peak > 0) {
 					lilVUBands[row].peak--;
 					lilVUBands[row].peak_decay_timer = esp_timer_get_time();// Reset the peak hold timer
@@ -322,7 +298,7 @@ void lil_shift_register_test() {
 			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, ~(1 << (col - 1)));
 			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << (row - 1)));
 			gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
-			vTaskDelay(50 / portTICK_PERIOD_MS);
+			vTaskDelay(25 / portTICK_PERIOD_MS);
 		}
 	}
 
