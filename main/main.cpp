@@ -37,7 +37,7 @@ CRGB leds[NUM_LEDS];
 #define AREF 3.3                // Analog reference voltage
 
 // --
-// WS2812 16x16 Serpentine LED Matrix Config
+// WS2812 16x16 Serpentine LED Matrix
 // --
 #define LED_MATRIX_WIDTH 16
 #define LED_MATRIX_HEIGHT 16
@@ -55,6 +55,33 @@ void mapXY() {
 	for (int x = 0; x < LED_MATRIX_WIDTH; x++)
 		for (int y = 0; y < LED_MATRIX_HEIGHT; y++)
 			XY[x][y] = calcXY(x, y);
+}
+
+void lil_init_led() {
+	// Initialize onboard LED
+	pinMode(RED_PIN, OUTPUT);
+	pinMode(GREEN_PIN, OUTPUT);
+	pinMode(BLUE_PIN, OUTPUT);
+	analogWrite(RED_PIN, 0);    // 50% brightness
+	analogWrite(GREEN_PIN, 255);// Off
+	analogWrite(BLUE_PIN, 128); // 50% brightness
+
+	// Initialize FastLED and set brightness
+	FastLED.addLeds<WS2812, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
+	FastLED.setBrightness(10);// Adjust as necessary
+	//FastLED.setTemperature(Candle);
+
+	// Test LED Matrix with rainbow
+	// for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
+	// FastLED.show();
+	// vTaskDelay(1000 / portTICK_PERIOD_MS);
+	// FastLED.clear();
+	// FastLED.show();
+
+	// Turn onboard LED off (We're done)
+	analogWrite(RED_PIN, 255);
+	analogWrite(GREEN_PIN, 255);
+	analogWrite(BLUE_PIN, 255);
 }
 
 void updateLedMatrixGrouped8(float *fft) {
@@ -143,7 +170,7 @@ void updateLedMatrixGrouped8(float *fft) {
 }
 
 // --
-// Simple 8x8 LED Matrix Config
+// Simple 8x8 LED Matrix on 2 8-bit Shift Registers
 // --
 #define LSBFIRST 0
 #define MSBFIRST 1
@@ -170,7 +197,7 @@ void refreshMatrix() {
 		memcpy8(local_matrixBuffer, matrixBuffer, 8);
 		matrixBufferReady = false;
 	}
-	for (int row = 7; row >= 0; row--) {
+	for (int row = 0; row < 8; row++) {
 		gpio_set_level(SR_LATCH_PIN, 0);
 		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, LSBFIRST, ~local_matrixBuffer[row]);// Columns
 		lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << row));        // Row
@@ -191,11 +218,62 @@ void refreshMatrixTimer(void *param) {
 
 void refreshMatrixTask(void *param) {
 	while (1) {
-		// Wait for the notification from the timer
+		// Wait for notification from the timer
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 		// Call refreshMatrix
 		refreshMatrix();
 	}
+}
+
+void lil_shift_register_test() {
+	// Set ALL LEDs On
+	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
+	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
+	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
+	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
+	vTaskDelay(500 / portTICK_PERIOD_MS);
+
+	// Step through every LED one-by-one
+	for (int row = 1; row <= 8; row++) {
+		for (int col = 1; col <= 8; col++) {
+			gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
+			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, ~(1 << (col - 1)));
+			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << (row - 1)));
+			gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
+			vTaskDelay(25 / portTICK_PERIOD_MS);
+		}
+	}
+
+	// Set ALL LEDs Off
+	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
+	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
+	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
+	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
+}
+
+void lil_init_8x8() {
+	// Initialize 8x8 and test all lights
+	gpio_config_t io_conf = {};
+	io_conf.intr_type = GPIO_INTR_DISABLE;// No interrupts
+	io_conf.mode = GPIO_MODE_OUTPUT;      // Set as output
+	io_conf.pin_bit_mask = (1ULL << SR_LATCH_PIN) | (1ULL << SR_DATA_PIN) | (1ULL << SR_CLOCK_PIN);
+	io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+	io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+	gpio_config(&io_conf);
+	lil_shift_register_test();
+
+	// Set up refresh task for multiplexing
+	const esp_timer_create_args_t timer_args = {
+			.callback = &refreshMatrixTimer,  // Function to call
+			.arg = NULL,                      // Arguments to pass (optional)
+			.dispatch_method = ESP_TIMER_TASK,// Runs callback in a dedicated task
+			.name = "refreshMatrixTimer",     // Timer name
+			.skip_unhandled_events = false};
+	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &refreshMatrixTimerHandle));
+	ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
+	//testMatrixBuffer();
+	// Create the matrix refresh task pinned to Cpu core 1
+	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
 }
 
 // void testMatrixBuffer() {
@@ -238,7 +316,7 @@ void updateMatrixBuffer2(float *fft) {
 
 		// Sum FFT values for the band's frequency range
 		for (int i = lilVUBands[row].min; i <= lilVUBands[row].max; i++) {
-			sum += fft[i * 2] * lilVUBands[row].scaling_coeff;
+			sum += (fft[i * 2] / 2) * lilVUBands[row].scaling_coeff;
 		}
 
 		// Calculate the new amplitude
@@ -283,32 +361,10 @@ void updateMatrixBuffer2(float *fft) {
 	matrixBufferReady = true;
 }
 
-void lil_shift_register_test() {
-	// Set ALL LEDs On
-	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
-	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
-	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
-	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
-	vTaskDelay(500 / portTICK_PERIOD_MS);
 
-	// Step through every LED one-by-one
-	for (int row = 1; row <= 8; row++) {
-		for (int col = 1; col <= 8; col++) {
-			gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
-			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, ~(1 << (col - 1)));
-			lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, (1 << (row - 1)));
-			gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
-			vTaskDelay(25 / portTICK_PERIOD_MS);
-		}
-	}
-
-	// Set ALL LEDs Off
-	gpio_set_level(SR_LATCH_PIN, 0);// Prepare to send data
-	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b11111111);
-	lil_shiftOut(SR_DATA_PIN, SR_CLOCK_PIN, MSBFIRST, 0b00000000);
-	gpio_set_level(SR_LATCH_PIN, 1);// Latch the data to output
-}
-
+// --
+// Initialize
+// --
 
 // --
 // Use ESP's Continuous ADC sampling into DMA for efficient high sampling rate
@@ -317,91 +373,19 @@ void lil_shift_register_test() {
 __attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
 float vFFT[SAMPLES * 2];// FFT Vector. SAMPLES * 2 because we need space for both real and imaginary parts of each sample
 
-// --
-// Initialize
-// --
-
-void lil_init_led() {
-	// Initialize onboard LED
-	pinMode(RED_PIN, OUTPUT);
-	pinMode(GREEN_PIN, OUTPUT);
-	pinMode(BLUE_PIN, OUTPUT);
-	analogWrite(RED_PIN, 0);    // 50% brightness
-	analogWrite(GREEN_PIN, 255);// Off
-	analogWrite(BLUE_PIN, 128); // 50% brightness
-
-	// Initialize FastLED and set brightness
-	FastLED.addLeds<WS2812, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
-	FastLED.setBrightness(10);// Adjust as necessary
-	//FastLED.setTemperature(Candle);
-
-	// Test LED Matrix with rainbow
-	// for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
-	// FastLED.show();
-	// vTaskDelay(1000 / portTICK_PERIOD_MS);
-	// FastLED.clear();
-	// FastLED.show();
-
-	// Initialize 8x8 and test all lights
-	gpio_config_t io_conf = {};
-	io_conf.intr_type = GPIO_INTR_DISABLE;// No interrupts
-	io_conf.mode = GPIO_MODE_OUTPUT;      // Set as output
-	io_conf.pin_bit_mask = (1ULL << SR_LATCH_PIN) | (1ULL << SR_DATA_PIN) | (1ULL << SR_CLOCK_PIN);
-	io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-	io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-	gpio_config(&io_conf);
-	lil_shift_register_test();
-
-	// Set up refresh task for multiplexing
-	const esp_timer_create_args_t timer_args = {
-			.callback = &refreshMatrixTimer,  // Function to call
-			.arg = NULL,                      // Arguments to pass (optional)
-			.dispatch_method = ESP_TIMER_TASK,// Runs callback in a dedicated task
-			.name = "refreshMatrixTimer",     // Timer name
-			.skip_unhandled_events = false};
-	ESP_ERROR_CHECK(esp_timer_create(&timer_args, &refreshMatrixTimerHandle));
-	ESP_ERROR_CHECK(esp_timer_start_periodic(refreshMatrixTimerHandle, SR_LED_MATRIX_REFRESH_RATE));
-	//testMatrixBuffer();
-	// Create the matrix refresh task pinned to Cpu core 1
-	xTaskCreatePinnedToCore(refreshMatrixTask, "refreshMatrixTask", 2048, NULL, 5, &refreshMatrixTaskHandle, 1);
-
-	// Turn onboard LED off (We're done)
-	analogWrite(RED_PIN, 255);
-	analogWrite(GREEN_PIN, 255);
-	analogWrite(BLUE_PIN, 255);
-}
-
 static TaskHandle_t app_main_task_handle;
 static bool IRAM_ATTR adc_conv_done_cb(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data) {
 	BaseType_t mustYield = pdFALSE;
 	vTaskNotifyGiveFromISR(app_main_task_handle, &mustYield);
 	return (mustYield == pdTRUE);
 }
+adc_continuous_handle_t lil_adc_handle = NULL;
 
-extern "C" void app_main(void) {
-	ESP_LOGI("app_main", "Started. Running on core: %d", xPortGetCoreID());
-	initArduino();
-
-	printf("Internal Total heap %d, internal Free Heap %d\n", (int) ESP.getHeapSize(), (int) ESP.getFreeHeap());
-	printf("SPIRam Total heap %d, SPIRam Free Heap %d\n", (int) ESP.getPsramSize(), (int) ESP.getFreePsram());
-	printf("ChipRevision %d, Cpu Freq %d, SDK Version %s\n", (int) ESP.getChipRevision(), (int) ESP.getCpuFreqMHz(), ESP.getSdkVersion());
-	printf("Flash Size %d, Flash Speed %d\n", (int) ESP.getFlashChipSize(), (int) ESP.getFlashChipSpeed());
-
-	lil_init_led();
-	mapXY();
-
-	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
-
-	app_main_task_handle = xTaskGetCurrentTaskHandle();
-
-	// --
-	// Set up ADC Continous Sampling w/ DMA Buffer for fast audio sampling
-	// --
-	adc_continuous_handle_t adc_handle = NULL;
+void lil_init_adc() {
 	adc_continuous_handle_cfg_t adc_config = {
 			.max_store_buf_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES * 4,
 			.conv_frame_size = SAMPLES * SOC_ADC_DIGI_RESULT_BYTES};
-	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &adc_handle));
+	ESP_ERROR_CHECK(adc_continuous_new_handle(&adc_config, &lil_adc_handle));
 
 	adc_continuous_config_t dig_cfg = {
 			.pattern_num = 1,
@@ -418,14 +402,34 @@ extern "C" void app_main(void) {
 			}};
 	dig_cfg.pattern_num = 1;
 	dig_cfg.adc_pattern = adc_pattern;
-	ESP_ERROR_CHECK(adc_continuous_config(adc_handle, &dig_cfg));
+	ESP_ERROR_CHECK(adc_continuous_config(lil_adc_handle, &dig_cfg));
 
 	adc_continuous_evt_cbs_t cbs = {
 			.on_conv_done = adc_conv_done_cb,
 			.on_pool_ovf = NULL};
-	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(adc_handle, &cbs, NULL));
+	ESP_ERROR_CHECK(adc_continuous_register_event_callbacks(lil_adc_handle, &cbs, NULL));
 
-	ESP_ERROR_CHECK(adc_continuous_start(adc_handle));
+	ESP_ERROR_CHECK(adc_continuous_start(lil_adc_handle));
+}
+
+
+extern "C" void app_main(void) {
+	ESP_LOGI("app_main", "Started. Running on core: %d", xPortGetCoreID());
+	initArduino();
+
+	printf("Internal Total heap %d, internal Free Heap %d\n", (int) ESP.getHeapSize(), (int) ESP.getFreeHeap());
+	printf("SPIRam Total heap %d, SPIRam Free Heap %d\n", (int) ESP.getPsramSize(), (int) ESP.getFreePsram());
+	printf("ChipRevision %d, Cpu Freq %d, SDK Version %s\n", (int) ESP.getChipRevision(), (int) ESP.getCpuFreqMHz(), ESP.getSdkVersion());
+	printf("Flash Size %d, Flash Speed %d\n", (int) ESP.getFlashChipSize(), (int) ESP.getFlashChipSpeed());
+
+	ESP_ERROR_CHECK(dsps_fft2r_init_fc32(NULL, CONFIG_DSP_MAX_FFT_SIZE));
+
+	app_main_task_handle = xTaskGetCurrentTaskHandle();
+
+	lil_init_8x8();
+	lil_init_led();
+	lil_init_adc();
+	mapXY();
 
 	uint32_t read_bytes = 0;
 	esp_err_t ret;
@@ -437,7 +441,7 @@ extern "C" void app_main(void) {
 		while (1) {
 			//ESP_LOGI("SoundFlowerSampling", "entering main loop");
 
-			ret = adc_continuous_read(adc_handle, audioBuffer, SAMPLES * SOC_ADC_DIGI_RESULT_BYTES, &read_bytes, 0);
+			ret = adc_continuous_read(lil_adc_handle, audioBuffer, SAMPLES * SOC_ADC_DIGI_RESULT_BYTES, &read_bytes, 0);
 
 			if (ret == ESP_OK) {
 				//ESP_LOGI("SoundFlowerSampling", "ret is %x, ret_num is %" PRIu32 " bytes", ret, read_bytes);
@@ -473,6 +477,6 @@ extern "C" void app_main(void) {
 		}
 	}
 
-	ESP_ERROR_CHECK(adc_continuous_stop(adc_handle));
-	ESP_ERROR_CHECK(adc_continuous_deinit(adc_handle));
+	ESP_ERROR_CHECK(adc_continuous_stop(lil_adc_handle));
+	ESP_ERROR_CHECK(adc_continuous_deinit(lil_adc_handle));
 }

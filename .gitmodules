@@ -1,3 +1,4 @@
 [submodule "components/FastLED"]
 	path = components/FastLED
 	url = git@github.com:lillianama/FastLED.git
+	branch = lillianama/esp-idf_arduino_nano_esp32
