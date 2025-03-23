@@ -72,11 +72,11 @@ void lil_init_led() {
 	//FastLED.setTemperature(Candle);
 
 	// Test LED Matrix with rainbow
-	// for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
-	// FastLED.show();
-	// vTaskDelay(1000 / portTICK_PERIOD_MS);
-	// FastLED.clear();
-	// FastLED.show();
+	for (int i = 0; i < NUM_LEDS; i++) leds[i] = CHSV(map(i, 0, NUM_LEDS - 1, 0, 255), 255, 255);
+	FastLED.show();
+	vTaskDelay(500 / portTICK_PERIOD_MS);
+	FastLED.clear();
+	FastLED.show();
 
 	// Turn onboard LED off (We're done)
 	analogWrite(RED_PIN, 255);
@@ -314,7 +314,7 @@ void updateMatrixBuffer2(float *fft) {
 	for (int row = 0; row < 8; row++) {
 		float sum = 0;
 
-		// Sum FFT values for the band's frequency range
+		// Sum FFT values for the band's frequency range and apply a scaling factor
 		for (int i = lilVUBands[row].min; i <= lilVUBands[row].max; i++) {
 			sum += (fft[i * 2] / 2) * lilVUBands[row].scaling_coeff;
 		}
@@ -373,13 +373,13 @@ void updateMatrixBuffer2(float *fft) {
 __attribute__((aligned(4))) static uint8_t audioBuffer[SAMPLES * SOC_ADC_DIGI_RESULT_BYTES];
 float vFFT[SAMPLES * 2];// FFT Vector. SAMPLES * 2 because we need space for both real and imaginary parts of each sample
 
+adc_continuous_handle_t lil_adc_handle = NULL;
 static TaskHandle_t app_main_task_handle;
 static bool IRAM_ATTR adc_conv_done_cb(adc_continuous_handle_t handle, const adc_continuous_evt_data_t *edata, void *user_data) {
 	BaseType_t mustYield = pdFALSE;
 	vTaskNotifyGiveFromISR(app_main_task_handle, &mustYield);
 	return (mustYield == pdTRUE);
 }
-adc_continuous_handle_t lil_adc_handle = NULL;
 
 void lil_init_adc() {
 	adc_continuous_handle_cfg_t adc_config = {
@@ -414,7 +414,7 @@ void lil_init_adc() {
 
 
 extern "C" void app_main(void) {
-	ESP_LOGI("app_main", "Started. Running on core: %d", xPortGetCoreID());
+	ESP_LOGI("app_main", "SoundFlower Starting. Running app_main on core: %d", xPortGetCoreID());
 	initArduino();
 
 	printf("Internal Total heap %d, internal Free Heap %d\n", (int) ESP.getHeapSize(), (int) ESP.getFreeHeap());
@@ -426,8 +426,8 @@ extern "C" void app_main(void) {
 
 	app_main_task_handle = xTaskGetCurrentTaskHandle();
 
-	lil_init_8x8();
 	lil_init_led();
+	lil_init_8x8();
 	lil_init_adc();
 	mapXY();
 
