@@ -1,8 +1,9 @@
 # Sound Flower
 
-An audio-reactive LED art piece that listens to the world around it and blooms with light. Sound Flower captures live audio through a tiny microphone, transforms it into frequency data with real-time FFT, and paints the results across two LED displays -- a vibrant 16x16 RGB matrix and a charming little 8x8 shift-register grid. Every beat, every note, every whisper of sound becomes a garden of color.
+Sound Flower captures live audio through a tiny microphone, transforms it into frequency data with real-time FFT, and paints the results across two LED displays -- a 16x16 RGB matrix and a charming little 8x8 shift-register grid. Every beat, every note, every whisper of sound becomes a garden of color.
 
-Built on the Arduino Nano ESP32 with the ESP-IDF framework, because beautiful things deserve a solid foundation.
+Built on ESP32 with the ESP-IDF Framework and utilizing both cores of the Xtensa processor for smooth visualization on the ESP32-S3.
+
 
 ## Features
 
